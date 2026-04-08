@@ -1,0 +1,20 @@
+# Arquivos de segredos do servidor — NUNCA subir ao repositório
+.env
+
+# Arquivos de credenciais criptografadas dos hosts (gerados pelo setup_credenciais.ps1)
+*.enc
+
+# Executáveis do instalador NSIS gerados
+*.exe
+
+# Arquivo de log local do PowerShell (se implementado no futuro)
+*.log
+
+# Arquivos de configuração do agente
+/.agents
+
+# Arquivos de geração do setup NSIS
+*.nsi
+
+# Cache Python
+/servidor/__pycache__
