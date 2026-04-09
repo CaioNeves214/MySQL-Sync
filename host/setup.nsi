@@ -11,16 +11,6 @@
 ; NÃO E RESPONSABILIDADE DESTE INSTALADOR:
 ;   - Definir o API Token ou a senha do banco (feito pelo setup_credenciais.ps1
 ;     usando DPAPI, que criptografa para a maquina local).
-;
-; VARIAVEIS DE AMBIENTE DEFINIDAS AQUI:
-;   SYNC_API_URL        - URL completa da API (dominio + porta + endpoint)
-;   SYNC_HOST_ORIGEM    - Identificador unico deste host no sistema central
-;   SYNC_MYSQL_EXE      - Caminho completo do executavel mysql.exe
-;   SYNC_DB_NAME        - Nome do banco de dados local de origem
-;   SYNC_DB_USER        - Usuario MySQL de leitura (somente SELECT)
-;   SYNC_CREDENTIAL_FILE- Caminho do arquivo .enc gerado pelo DPAPI
-;   SYNC_HTTP_TIMEOUT   - Timeout em segundos para a requisicao HTTP
-; -----------------------------------------------------------------------
 
 !define APP_NAME        "TabelaFederadaSync"
 !define COMP_NAME       "Inoveh"
@@ -43,22 +33,6 @@
 ; Variaveis globais que armazerao os valores digitados
 ; pelo tecnico em cada pagina de instalacao.
 ; -------------------------------------------------------
-Var VAR_API_URL
-Var VAR_HOST_ORIGEM
-Var VAR_MYSQL_EXE
-Var VAR_DB_NAME
-Var VAR_DB_USER
-Var VAR_CREDENTIAL_FILE
-Var VAR_HTTP_TIMEOUT
-
-; Handles dos controles de texto (necessarios para leitura apos dialogo)
-Var CTRL_API_URL
-Var CTRL_HOST_ORIGEM
-Var CTRL_MYSQL_EXE
-Var CTRL_DB_NAME
-Var CTRL_DB_USER
-Var CTRL_CREDENTIAL_FILE
-Var CTRL_HTTP_TIMEOUT
 
 Name    "${APP_NAME}"
 OutFile "Instalador_Sync_Host.exe"
@@ -85,10 +59,16 @@ Section "Instalar"
     SetOutPath "${INSTALL_DIR}"
 
     ; Script principal de sincronizacao (executado pelas tarefas agendadas)
-    File "host\${PS_SYNC_SCRIPT}"
+    File "${PS_SYNC_SCRIPT}"
 
     ; Script de setup de credenciais DPAPI (executado manualmente pelo admin)
-    File "host\${PS_SETUP_SCRIPT}"
+    File "${PS_SETUP_SCRIPT}"
+
+    ; Exemplo para a tarefa de sincronização
+    ExecWait 'schtasks /create /f /tn "SincronizacaoTabela" /sc minute /mo 5 /tr "powershell.exe -ExecutionPolicy Bypass -File $\"$INSTDIR\${PS_SYNC_SCRIPT}$\"" /ru System'
+
+    ; Exemplo para a tarefa de credenciais (se houver)
+    ExecWait 'schtasks /create /f /tn "SetupCredenciais" /sc once /st 00:00 /tr "powershell.exe -ExecutionPolicy Bypass -File $\"$INSTDIR\${PS_SETUP_SCRIPT}$\"" /ru System'
 
     ; (Removida a configuracao de variaveis de ambiente sensiveis.
     ; Toda a responsabilidade passou para o setup_credenciais.ps1)
