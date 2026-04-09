@@ -83,149 +83,173 @@ Write-Host "Este script vai criptografar e salvar suas credenciais"
 Write-Host "usando a DPAPI do Windows (vinculado a este usuario/maquina)."
 Write-Host ""
 
-# Aviso se não está rodando como Administrador (necessário para escrever em ProgramData)
+# Verificação OBRIGATÓRIA de Administrador
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
-    Write-Warning "Recomendado executar como Administrador para salvar em C:\ProgramData."
-    Write-Warning "Pressione Ctrl+C para cancelar e re-executar como Admin, ou Enter para continuar assim mesmo."
-    Read-Host | Out-Null
+    Write-Host ""
+    Write-Host "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" -ForegroundColor Red
+    Write-Host "  ERRO: ESTE SCRIPT REQUER PRIVILEGIOS DE ADMINISTRADOR" -ForegroundColor Red
+    Write-Host "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Motivo: E necessario para salvar em C:\ProgramData e configurar"
+    Write-Host "uma variavel de ambiente de SISTEMA (Machine)."
+    Write-Host ""
+    Write-Host "COMO RESOLVER:"
+    Write-Host "1. Feche esta janela."
+    Write-Host "2. Clique com o botao direito no icone do PowerShell."
+    Write-Host "3. Selecione 'Executar como Administrador'."
+    Write-Host "4. Navegue ate a pasta do script e execute-o novamente."
+    Write-Host ""
+    Write-Host "Pressione ENTER para fechar..."
+    $null = Read-Host
+    exit
 }
-
-# --- COLETA SEGURA DO HOST_ORIGEM ---
-Write-Host "--- PASSO 1: Identificação do Host ---" -ForegroundColor Yellow
-$hostOrigem = Read-Host "Digite o nome unico deste host (ex: FILIAL_SP_01)"
-if (-not $hostOrigem) {
-    Write-Error "Nome do host nao pode ser vazio."
-    exit 1
-}
-
-# --- COLETA SEGURA DE INFORMACOES DE AMBIENTE ---
-Write-Host "--- PASSO 2: URL e Configurações API ---" -ForegroundColor Yellow
-$apiUrl = Read-Host "URL completa da API (ex: https://api.dominio.com/federated/sincronizar)"
-$secureApiToken = Request-SecureInput -Prompt "Cole o API Token confidencial" -Confirmation "Confirme o API Token"
-
-Write-Host ""
-Write-Host "--- PASSO 3: Configuracoes MySQL ---" -ForegroundColor Yellow
-$mysqlExe = Read-Host "Caminho do mysql.exe [Pressione ENTER para default: C:\MySQL\bin\mysql.exe]"
-if (-not $mysqlExe) { $mysqlExe = "C:\MySQL\bin\mysql.exe" }
-
-$dbName = Read-Host "Nome do banco de dados [Pressione ENTER para default: bdsia]"
-if (-not $dbName) { $dbName = "bdsia" }
-
-$dbUser = Read-Host "Usuario MySQL (leitura) [Pressione ENTER para default: relatorio]"
-if (-not $dbUser) { $dbUser = "relatorio" }
-
-$secureDbPass = Request-SecureInput -Prompt "Digite a senha do banco MySQL" -Confirmation "Confirme a senha do banco MySQL"
-
-$httpTimeout = "180" # Default 180 sec para HttpTimeout
-Write-Host ""
-
-# ============================================================
-# CRIPTOGRAFIA VIA DPAPI (Escopo LocalMachine)
-# Utilizando a classe .NET direta permite que qualquer usuário 
-# SYSTEM do mesmo OS descriptografe, essencial para o schtasks.
-# ============================================================
-
-Write-Host "Criptografando credenciais com DPAPI e envelopando JSON..." -ForegroundColor Green
-
-# Converte SecureStrings para PlainText para o JSON (em memoria)
-$plainApiToken = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureApiToken))
-$plainDbPass   = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureDbPass))
-
-# Monta o objeto JSON que ficará integralmente dentro do arquivo protegido
-$credObject = @{
-    ApiUrl     = $apiUrl
-    ApiToken   = $plainApiToken
-    MysqlExe   = $mysqlExe
-    DbName     = $dbName
-    DbUser     = $dbUser
-    DbPassword = $plainDbPass
-    HttpTimeout= $httpTimeout
-    HostOrigem = $hostOrigem
-    CriadoEm   = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
-}
-
-# Limpa strings sensíveis assim que colocadas no Hash
-$plainApiToken = $null
-$plainDbPass   = $null
-
-$jsonPayload = $credObject | ConvertTo-Json -Depth 3
-$plainBytes  = [System.Text.Encoding]::UTF8.GetBytes($jsonPayload)
-
-# Usa a DPAPI com *LocalMachine* - Vinculado APENAS à máquina atual. Ninguém consegue ler de fora.
-$encryptedBytes = [System.Security.Cryptography.ProtectedData]::Protect($plainBytes, $null, [System.Security.Cryptography.DataProtectionScope]::LocalMachine)
-
-
-# ============================================================
-# PERSISTÊNCIA: Salva o arquivo .enc em disco
-# ============================================================
-
-# Cria o diretório de instalação se não existir
-if (-not (Test-Path $INSTALL_DIR)) {
-    New-Item -ItemType Directory -Path $INSTALL_DIR -Force | Out-Null
-    Write-Host "Diretorio criado: $INSTALL_DIR"
-}
-
-# Salva o arquivo em Base64
-[System.Convert]::ToBase64String($encryptedBytes) | Set-Content -Path $CREDENTIAL_FILE -Encoding UTF8
-
-# ============================================================
-# HARDENING: Aplica permissões NTFS restritas no arquivo
-# Apenas o usuário atual e SYSTEM podem ler o arquivo.
-# ============================================================
 
 try {
-    # Obtém a ACL atual
-    $acl = Get-Acl $CREDENTIAL_FILE
+    # --- COLETA SEGURA DO HOST_ORIGEM ---
+    Write-Host "--- PASSO 1: Identificação do Host ---" -ForegroundColor Yellow
+    $hostOrigem = Read-Host "Digite o nome unico deste host (ex: FILIAL_SP_01)"
+    if ([string]::IsNullOrWhiteSpace($hostOrigem)) {
+        throw "O nome do host (HostOrigem) e obrigatorio."
+    }
 
-    # Remove a herança de permissões do diretório pai (isola o arquivo)
-    $acl.SetAccessRuleProtection($true, $false) # (isProtected, preserveInheritance)
+    # --- COLETA SEGURA DE INFORMACOES DE AMBIENTE ---
+    Write-Host "--- PASSO 2: URL e Configurações API ---" -ForegroundColor Yellow
+    $apiUrl = Read-Host "URL completa da API (ex: https://api.dominio.com/federated/sincronizar)"
+    if ([string]::IsNullOrWhiteSpace($apiUrl)) {
+        throw "A URL da API e obrigatoria."
+    }
 
-    # Remove todas as permissões atuais (para começar de zero)
-    $acl.Access | ForEach-Object { $acl.RemoveAccessRule($_) | Out-Null }
+    $secureApiToken = Request-SecureInput -Prompt "Cole o API Token confidencial" -Confirmation "Confirme o API Token"
+    if ($null -eq $secureApiToken -or $secureApiToken.Length -eq 0) {
+        throw "O API Token e obrigatorio."
+    }
 
-    # Permissão 1: Administradores Locais
-    $ruleAdmins = New-Object System.Security.AccessControl.FileSystemAccessRule(
-        "Administrators", "Read,Write", "None", "None", "Allow"
-    )
-    $acl.AddAccessRule($ruleAdmins)
+    Write-Host ""
+    Write-Host "--- PASSO 3: Configuracoes MySQL ---" -ForegroundColor Yellow
+    $mysqlExe = Read-Host "Caminho do mysql.exe [Pressione ENTER para default: C:\MySQL\bin\mysql.exe]"
+    if (-not $mysqlExe) { $mysqlExe = "C:\MySQL\bin\mysql.exe" }
 
-    # Permissão 2: SYSTEM pode ler (necessário se o Task Scheduler rodar como SYSTEM)
-    $ruleSystem = New-Object System.Security.AccessControl.FileSystemAccessRule(
-        "SYSTEM", "Read", "None", "None", "Allow"
-    )
-    $acl.AddAccessRule($ruleSystem)
+    $dbName = Read-Host "Nome do banco de dados [Pressione ENTER para default: bdsia]"
+    if (-not $dbName) { $dbName = "bdsia" }
 
-    # Aplica a ACL no arquivo
-    Set-Acl -Path $CREDENTIAL_FILE -AclObject $acl
-    Write-Host "Permissoes NTFS aplicadas: acesso restrito a Administrators e SYSTEM." -ForegroundColor Green
+    $dbUser = Read-Host "Usuario MySQL (leitura) [Pressione ENTER para default: relatorio]"
+    if (-not $dbUser) { $dbUser = "relatorio" }
+
+    $secureDbPass = Request-SecureInput -Prompt "Digite a senha do banco MySQL" -Confirmation "Confirme a senha do banco MySQL"
+    if ($null -eq $secureDbPass -or $secureDbPass.Length -eq 0) {
+        throw "A senha do banco de dados e obrigatoria."
+    }
+
+    $httpTimeout = "180" # Default 180 sec para HttpTimeout
+    Write-Host ""
+
+    # ============================================================
+    # CRIPTOGRAFIA VIA DPAPI (Escopo LocalMachine)
+    # ============================================================
+
+    Write-Host "Criptografando credenciais com DPAPI e envelopando JSON..." -ForegroundColor Green
+
+    # Converte SecureStrings para PlainText para o JSON (em memoria)
+    $ptrApiToken = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureApiToken)
+    $ptrDbPass   = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureDbPass)
+    try {
+        $plainApiToken = [Runtime.InteropServices.Marshal]::PtrToStringAuto($ptrApiToken)
+        $plainDbPass   = [Runtime.InteropServices.Marshal]::PtrToStringAuto($ptrDbPass)
+    } finally {
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptrApiToken)
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptrDbPass)
+    }
+
+    # Monta o objeto JSON que ficará integralmente dentro do arquivo protegido
+    $credObject = @{
+        ApiUrl     = $apiUrl
+        ApiToken   = $plainApiToken
+        MysqlExe   = $mysqlExe
+        DbName     = $dbName
+        DbUser     = $dbUser
+        DbPassword = $plainDbPass
+        HttpTimeout= $httpTimeout
+        HostOrigem = $hostOrigem
+        CriadoEm   = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+    }
+
+    # Limpa strings sensíveis assim que colocadas no Hash
+    $plainApiToken = $null
+    $plainDbPass   = $null
+
+    $jsonPayload = $credObject | ConvertTo-Json -Depth 3
+    $plainBytes  = [System.Text.Encoding]::UTF8.GetBytes($jsonPayload)
+
+    # Usa a DPAPI com *LocalMachine* - Vinculado APENAS à máquina atual.
+    $encryptedBytes = [System.Security.Cryptography.ProtectedData]::Protect($plainBytes, $null, [System.Security.Cryptography.DataProtectionScope]::LocalMachine)
+
+
+    # ============================================================
+    # PERSISTÊNCIA: Salva o arquivo .enc em disco
+    # ============================================================
+
+    # Cria o diretório de instalação se não existir
+    if (-not (Test-Path $INSTALL_DIR)) {
+        New-Item -ItemType Directory -Path $INSTALL_DIR -Force | Out-Null
+        Write-Host "Diretorio criado: $INSTALL_DIR"
+    }
+
+    # Salva o arquivo em Base64
+    [System.Convert]::ToBase64String($encryptedBytes) | Set-Content -Path $CREDENTIAL_FILE -Encoding UTF8
+
+    # ============================================================
+    # HARDENING: Aplica permissões NTFS restritas no arquivo
+    # ============================================================
+
+    try {
+        $acl = Get-Acl $CREDENTIAL_FILE
+        $acl.SetAccessRuleProtection($true, $false)
+        $acl.Access | ForEach-Object { $acl.RemoveAccessRule($_) | Out-Null }
+
+        $ruleAdmins = New-Object System.Security.AccessControl.FileSystemAccessRule(
+            "Administrators", "Read,Write", "None", "None", "Allow"
+        )
+        $acl.AddAccessRule($ruleAdmins)
+
+        $ruleSystem = New-Object System.Security.AccessControl.FileSystemAccessRule(
+            "SYSTEM", "Read", "None", "None", "Allow"
+        )
+        $acl.AddAccessRule($ruleSystem)
+
+        Set-Acl -Path $CREDENTIAL_FILE -AclObject $acl
+        Write-Host "Permissoes NTFS aplicadas: acesso restrito a Administrators e SYSTEM." -ForegroundColor Green
+    } catch {
+        Write-Warning "Nao foi possivel aplicar permissoes NTFS avancadas: $($_.Exception.Message)"
+    }
+
+    # ============================================================
+    # CONFIGURAÇÃO DA VARIÁVEL DE AMBIENTE (host_origem)
+    # ============================================================
+
+    Write-Host ""
+    Write-Host "Configurando variavel de ambiente SYNC_HOST_ORIGEM..." -ForegroundColor Green
+    [System.Environment]::SetEnvironmentVariable("SYNC_HOST_ORIGEM", $hostOrigem, "Machine")
+
+    Write-Host ""
+    Write-Host "============================================================" -ForegroundColor Green
+    Write-Host "  SETUP CONCLUIDO COM SUCESSO!" -ForegroundColor Green
+    Write-Host "============================================================" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "  Arquivo de credenciais: $CREDENTIAL_FILE"
+    Write-Host "  Host de origem definido: $hostOrigem"
+    Write-Host ""
+
 } catch {
-    Write-Warning "Nao foi possivel aplicar permissoes NTFS avancadas: $($_.Exception.Message)"
+    Write-Host ""
+    Write-Host "============================================================" -ForegroundColor Red
+    Write-Host "  ERRO DURANTE O SETUP!" -ForegroundColor Red
+    Write-Host "============================================================" -ForegroundColor Red
+    Write-Error $_.Exception.Message
+    Write-Host "Script interrompido."
+} finally {
+    Write-Host ""
+    Write-Host "Pressione ENTER para fechar esta janela..."
+    $null = Read-Host
 }
 
-# ============================================================
-# CONFIGURAÇÃO DA VARIÁVEL DE AMBIENTE (host_origem — NÃO é segredo)
-# Note: Somente o host_origem (identificador) vai para variável de ambiente.
-# Senhas e tokens ficam NO arquivo .enc.
-# ============================================================
-
-Write-Host ""
-Write-Host "Configurando variavel de ambiente SYNC_HOST_ORIGEM..." -ForegroundColor Green
-[System.Environment]::SetEnvironmentVariable("SYNC_HOST_ORIGEM", $hostOrigem, "Machine")
-
-# ============================================================
-# FINALIZAÇÃO
-# ============================================================
-
-Write-Host ""
-Write-Host "============================================================" -ForegroundColor Green
-Write-Host "  SETUP CONCLUIDO COM SUCESSO!" -ForegroundColor Green
-Write-Host "============================================================" -ForegroundColor Green
-Write-Host ""
-Write-Host "  Arquivo de credenciais: $CREDENTIAL_FILE"
-Write-Host "  Host de origem definido: $hostOrigem"
-Write-Host ""
-Write-Host " IMPORTANTE: Guarde o API Token original em um cofre de senhas" -ForegroundColor Yellow
-Write-Host " corporativo. Se o perfil do usuario Windows for perdido, voce" -ForegroundColor Yellow
-Write-Host " precisara rodar este setup novamente com o token original." -ForegroundColor Yellow
-Write-Host ""
