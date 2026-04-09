@@ -11,12 +11,13 @@ load_dotenv()
 class Config:
     """Configurações da API carregadas do ambiente."""
     
-    # Configuração do Banco de Dados conforme aiguide.md
+    # Configuração do Banco de Dados conforme os segredos do .env
     DB_CONFIG = {
         'host': os.getenv('DB_HOST', 'localhost'),
         'user': os.getenv('DB_USER'),
         'password': os.getenv('DB_PASSWORD'),
-        'database': os.getenv('DB_DATABASE')
+        'database': os.getenv('DB_DATABASE'),
+        'port': int(os.getenv('DB_PORT'))
     }
     
     # Token de segurança para autenticacao

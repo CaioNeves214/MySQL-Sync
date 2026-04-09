@@ -61,7 +61,7 @@ function Read-EncryptedConfig {
 }
 
 # ================================================================
-# BLOCO 3: CARREGAMENTO DAS CREDENCIAIS E VALIDACOES INICIAIS
+# BLOCO: CARREGAMENTO DAS CREDENCIAIS E VALIDACOES INICIAIS
 # ================================================================
 # Todas as variaveis de ambiente sao validadas antes de qualquer operacao.
 # Se uma variavel estiver ausente, o script aborta com mensagem clara,
@@ -124,6 +124,9 @@ try {
     }
 
     # --- ETAPA 3: PAYLOAD ---
+    if (-not $HOST_ORIGEM) {
+        throw "ERRO: HOST_ORIGEM nao definido. Verifique variavel de ambiente SYNC_HOST_ORIGEM ou config.enc"
+    }
     $payload = @{ host_origem = $HOST_ORIGEM; registros = $registros } | ConvertTo-Json -Depth 5 -Compress
 
     # --- ETAPA 4: JITTER ---
@@ -132,10 +135,15 @@ try {
     Start-Sleep -Seconds $delay
 
     # --- ETAPA 5: ENVIO HTTPS ---
-    $headers = @{ "X-API-Token" = $API_TOKEN; "Content-Type" = "application/json" }
+    # Forçamos o charset=utf-8 no Content-Type para evitar que o PowerShell use ISO-8859-1 (latin1)
+    $headers = @{ "X-API-Token" = $API_TOKEN; "Content-Type" = "application/json; charset=utf-8" }
     Write-SyncLog "Enviando $($registros.Count) registros..."
     
-    $response = Invoke-RestMethod -Uri $API_URL -Method Post -Headers $headers -Body $payload -TimeoutSec $HTTP_TIMEOUT_SEGUNDOS -ErrorAction Stop
+    # IMPORTANTE: Em PS 5.1, Converter string para BYTES UTF-8 é a única forma de garantir
+    # que o charset=utf-8 do header seja respeitado e não quebre no servidor.
+    $payloadBytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
+    
+    $response = Invoke-RestMethod -Uri $API_URL -Method Post -Headers $headers -Body $payloadBytes -TimeoutSec $HTTP_TIMEOUT_SEGUNDOS -ErrorAction Stop
     $API_TOKEN = $null
 
     # --- ETAPA 6: RESPOSTA ---

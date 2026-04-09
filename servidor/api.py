@@ -28,18 +28,30 @@ def sincronizar():
         return jsonify({"erro": "Nao autorizado"}), 401
 
     # 2. Carrega corpo da requisição
-    data = request.get_json()
+    data = None
+    try:
+        data = request.get_json()
+    except Exception as e:
+        error_msg = "[ERROR] {0} - Falha no parse JSON: {1}".format(request.remote_addr, str(e))
+        print(error_msg)
+
+        return jsonify({
+            "erro": "JSON malformado ou invalido (Check api_error.log)",
+            "detalhe": str(e)
+        }), 400
+
     if not data:
-        # 400: Mal-formatado
-        return jsonify({"erro": "JSON invalido ou ausente"}), 400
+        return jsonify({"erro": "Corpo da requisicao vazio"}), 400
 
     host_origem = data.get('host_origem')
     registros = data.get('registros')
 
     # 3. Validação básica de campos obrigatórios
     if not host_origem or not isinstance(registros, list):
-        # 400: Erro de payload
-        return jsonify({"erro": "host_origem e registros sao obrigatorios"}), 400
+        print("[ERROR] Payload incompleto: host_origem={0}, registros_tipo={1}".format(
+            host_origem, type(registros)
+        ))
+        return jsonify({"erro": "host_origem e registros[] sao obrigatorios"}), 400
 
     conn = None
     inseridos = 0
@@ -86,11 +98,14 @@ def sincronizar():
 
     except mysql.connector.Error as err:
         # Erro de banco de dados (500)
-        # Nota: f-strings nao existem no Python 2.7 — usamos .format() aqui
+        error_msg = "[DATABASE ERROR] {0}".format(str(err))
+        print(error_msg)
         return jsonify({"erro": "Erro banco: {0}".format(str(err))}), 500
 
     except Exception as e:
         # Erro inesperado
+        error_msg = "[INTERNAL ERROR] {0}".format(str(e))
+        print(error_msg)
         return jsonify({"erro": "Erro interno: {0}".format(str(e))}), 500
 
     finally:
