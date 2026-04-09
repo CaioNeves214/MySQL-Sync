@@ -15,3 +15,6 @@
 
 # Cache Python
 /servidor/__pycache__
+
+# JSON Debug
+.json
