@@ -17,4 +17,4 @@
 /servidor/__pycache__
 
 # JSON Debug
-.json
+*.json
