@@ -30,9 +30,12 @@
 
 # --- CONFIGURAÇÕES DO SETUP ---
 # Diretório onde o arquivo de credenciais será salvo
-# ProgramData é visível para todos os usuários, mas o conteúdo está criptografado por DPAPI
+# ProgramData é visível para todos os usuários, mas o conteúdo será criptografado por DPAPI
 $INSTALL_DIR     = "C:\ProgramData\TabelaFederadaSync"
 $CREDENTIAL_FILE = Join-Path $INSTALL_DIR "credenciais.enc"
+
+# Necessário carregar o assembly de criptografia avançada (.NET)
+Add-Type -AssemblyName System.Security
 
 # ============================================================
 # FUNÇÃO: Solicita senha de forma segura (sem exibir no terminal)
@@ -96,37 +99,62 @@ if (-not $hostOrigem) {
     exit 1
 }
 
-# --- COLETA SEGURA DO API TOKEN ---
-Write-Host ""
-Write-Host "--- PASSO 2: API Token ---" -ForegroundColor Yellow
-Write-Host "(Fornecido pelo administrador do servidor central)"
-$secureApiToken = Request-SecureInput -Prompt "Cole o API Token" -Confirmation "Confirme o API Token"
+# --- COLETA SEGURA DE INFORMACOES DE AMBIENTE ---
+Write-Host "--- PASSO 2: URL e Configurações API ---" -ForegroundColor Yellow
+$apiUrl = Read-Host "URL completa da API (ex: https://api.dominio.com/federated/sincronizar)"
+$secureApiToken = Request-SecureInput -Prompt "Cole o API Token confidencial" -Confirmation "Confirme o API Token"
 
-# --- COLETA SEGURA DA SENHA DO BANCO LOCAL ---
 Write-Host ""
-Write-Host "--- PASSO 3: Senha do MySQL Local (user relatorio) ---" -ForegroundColor Yellow
-$secureDbPass = Request-SecureInput -Prompt "Digite a senha do user relatorio" -Confirmation "Confirme a senha do user relatorio"
+Write-Host "--- PASSO 3: Configuracoes MySQL ---" -ForegroundColor Yellow
+$mysqlExe = Read-Host "Caminho do mysql.exe [Pressione ENTER para default: C:\MySQL\bin\mysql.exe]"
+if (-not $mysqlExe) { $mysqlExe = "C:\MySQL\bin\mysql.exe" }
+
+$dbName = Read-Host "Nome do banco de dados [Pressione ENTER para default: bdsia]"
+if (-not $dbName) { $dbName = "bdsia" }
+
+$dbUser = Read-Host "Usuario MySQL (leitura) [Pressione ENTER para default: relatorio]"
+if (-not $dbUser) { $dbUser = "relatorio" }
+
+$secureDbPass = Request-SecureInput -Prompt "Digite a senha do banco MySQL" -Confirmation "Confirme a senha do banco MySQL"
+
+$httpTimeout = "180" # Default 180 sec para HttpTimeout
+Write-Host ""
 
 # ============================================================
-# CRIPTOGRAFIA VIA DPAPI (ConvertFrom-SecureString sem chave)
-# Quando usada SEM -Key, a DPAPI usa a chave do perfil do usuário atual.
+# CRIPTOGRAFIA VIA DPAPI (Escopo LocalMachine)
+# Utilizando a classe .NET direta permite que qualquer usuário 
+# SYSTEM do mesmo OS descriptografe, essencial para o schtasks.
 # ============================================================
 
-Write-Host ""
-Write-Host "Criptografando credenciais com DPAPI..." -ForegroundColor Green
+Write-Host "Criptografando credenciais com DPAPI e envelopando JSON..." -ForegroundColor Green
 
-# ConvertFrom-SecureString sem -Key usa DPAPI do Windows (vinculado ao usuário e máquina)
-$encryptedApiToken = ConvertFrom-SecureString $secureApiToken
-$encryptedDbPass   = ConvertFrom-SecureString $secureDbPass
+# Converte SecureStrings para PlainText para o JSON (em memoria)
+$plainApiToken = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureApiToken))
+$plainDbPass   = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureDbPass))
 
-# Monta o objeto JSON que será salvo no arquivo .enc
-# Cada campo é uma SecureString serializada (cifrada em hex pela DPAPI)
+# Monta o objeto JSON que ficará integralmente dentro do arquivo protegido
 $credObject = @{
-    ApiToken   = $encryptedApiToken   # Token da API remota — criptografado
-    DbPassword = $encryptedDbPass     # Senha do MySQL local — criptografado
-    CriadoEm  = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")  # Metadado de auditoria
-    HostOrigemSugerido = $hostOrigem  # HOST_ORIGEM para referência (não é segredo)
+    ApiUrl     = $apiUrl
+    ApiToken   = $plainApiToken
+    MysqlExe   = $mysqlExe
+    DbName     = $dbName
+    DbUser     = $dbUser
+    DbPassword = $plainDbPass
+    HttpTimeout= $httpTimeout
+    HostOrigem = $hostOrigem
+    CriadoEm   = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
 }
+
+# Limpa strings sensíveis assim que colocadas no Hash
+$plainApiToken = $null
+$plainDbPass   = $null
+
+$jsonPayload = $credObject | ConvertTo-Json -Depth 3
+$plainBytes  = [System.Text.Encoding]::UTF8.GetBytes($jsonPayload)
+
+# Usa a DPAPI com *LocalMachine* - Vinculado APENAS à máquina atual. Ninguém consegue ler de fora.
+$encryptedBytes = [System.Security.Cryptography.ProtectedData]::Protect($plainBytes, $null, [System.Security.Cryptography.DataProtectionScope]::LocalMachine)
+
 
 # ============================================================
 # PERSISTÊNCIA: Salva o arquivo .enc em disco
@@ -138,8 +166,8 @@ if (-not (Test-Path $INSTALL_DIR)) {
     Write-Host "Diretorio criado: $INSTALL_DIR"
 }
 
-# Salva o JSON no arquivo .enc
-$credObject | ConvertTo-Json -Depth 3 | Set-Content -Path $CREDENTIAL_FILE -Encoding UTF8
+# Salva o arquivo em Base64
+[System.Convert]::ToBase64String($encryptedBytes) | Set-Content -Path $CREDENTIAL_FILE -Encoding UTF8
 
 # ============================================================
 # HARDENING: Aplica permissões NTFS restritas no arquivo
@@ -156,12 +184,11 @@ try {
     # Remove todas as permissões atuais (para começar de zero)
     $acl.Access | ForEach-Object { $acl.RemoveAccessRule($_) | Out-Null }
 
-    # Permissão 1: Apenas o usuário atual pode ler (o DPAPI já restringe, mas adicionamos NTFS também)
-    $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-    $ruleUser = New-Object System.Security.AccessControl.FileSystemAccessRule(
-        $currentUser, "Read,Write", "None", "None", "Allow"
+    # Permissão 1: Administradores Locais
+    $ruleAdmins = New-Object System.Security.AccessControl.FileSystemAccessRule(
+        "Administrators", "Read,Write", "None", "None", "Allow"
     )
-    $acl.AddAccessRule($ruleUser)
+    $acl.AddAccessRule($ruleAdmins)
 
     # Permissão 2: SYSTEM pode ler (necessário se o Task Scheduler rodar como SYSTEM)
     $ruleSystem = New-Object System.Security.AccessControl.FileSystemAccessRule(
@@ -171,10 +198,9 @@ try {
 
     # Aplica a ACL no arquivo
     Set-Acl -Path $CREDENTIAL_FILE -AclObject $acl
-    Write-Host "Permissoes NTFS aplicadas: acesso restrito ao usuario atual e SYSTEM." -ForegroundColor Green
+    Write-Host "Permissoes NTFS aplicadas: acesso restrito a Administrators e SYSTEM." -ForegroundColor Green
 } catch {
     Write-Warning "Nao foi possivel aplicar permissoes NTFS avancadas: $($_.Exception.Message)"
-    Write-Warning "O arquivo ainda esta criptografado por DPAPI, mas as permissoes NTFS nao foram restringidas."
 }
 
 # ============================================================

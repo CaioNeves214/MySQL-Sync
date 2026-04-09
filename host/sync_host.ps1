@@ -9,113 +9,40 @@
                maquina. Backups do arquivo .enc sao inuteis em outro host.
     Execucao : Windows Task Scheduler (Diario as 08:00, 12:00 e 18:00)
     ============================================================
-
-    POLITICA DE EXECUCAO:
-    Este script configura sua propria politica de execucao via Set-ExecutionPolicy
-    no escopo do processo atual. Isso dispensa o uso de flags externas como
-    -ExecutionPolicy Bypass no agendador de tarefas, tornando a execucao mais
-    segura e auditavel: a politica e restrita apenas a este processo, nao altera
-    a politica global da maquina.
-    ============================================================
 #>
 
-# ================================================================
-# BLOCO 0: POLITICA DE EXECUCAO (Auto-configurada no escopo do processo)
-# ================================================================
-
-# Define a politica de execucao apenas para o processo atual (nao altera a maquina).
-# "RemoteSigned": Scripts locais rodam livre; scripts baixados da internet precisam de assinatura.
-# Isso e mais seguro que "Bypass" (que ignora tudo) e evita o erro "nao pode ser carregado".
-Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process -Force
-
-# ================================================================
-# BLOCO 1: CONFIGURACOES FIXAS (Nao sao segredos - podem ficar aqui)
-# ================================================================
+# === BLOCO 1 E 2 UNIFICADOS: LEITURA SEGURA DE CREDENCIAIS E CONFIGS ===
+# Todo tráfego de dados e senhas é contido em AES (DataProtection LocalMachine).
+# Não dependemos mais das variáveis de ambiente de sistema expostas.
 
 # Forca TLS 1.2 para comunicacao HTTPS segura com o servidor.
-# Necessario em Windows 10 mais antigos que podem nao ativar TLS 1.2 por padrao.
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12, [Net.SecurityProtocolType]::Tls11, [Net.SecurityProtocolType]::Tls
-
-# Suprime a barra de progresso do Invoke-RestMethod (melhora performance e evita erros em sessoes sem UI)
 $ProgressPreference = 'SilentlyContinue'
 
-# Timeout em segundos para a requisicao HTTP ao servidor.
-# IMPORTANTE: O jitter (Start-Sleep) ocorre ANTES do envio HTTP, portanto nao interfere
-# neste timeout. Este valor cobre apenas o tempo de upload + resposta do servidor.
-# 180 segundos e suficiente para payloads de ate 1000 registros em conexoes lentas.
-$HTTP_TIMEOUT_SEGUNDOS = 180
-
-# URL da API remota (destino de sincronizacao)
-$API_URL     = "http://srv.inoveh.com.br:5000/federated/sincronizar"
-
-# Identificador unico e IMUTAVEL deste host no sistema centralizado.
-# ATENCAO: Alterar este valor apos a primeira sincronizacao ira quebrar a
-# idempotencia e pode gerar registros duplicados no servidor.
-$HOST_ORIGEM = [System.Environment]::GetEnvironmentVariable("SYNC_HOST_ORIGEM", "Machine")
-
-# Caminho do executavel MySQL instalado neste host
-$MYSQL_EXE   = "C:\MySQL\bin\mysql.exe"
-
-# Nome do banco de dados local de origem
-$DB_NAME     = "bdsia"
-$DB_USER     = "relatorio"   # Usuario de leitura local (somente SELECT necessario)
-
-# Caminho do arquivo de credenciais criptografadas (gerado pelo setup_credenciais.ps1)
-# ProgramData e acessivel ao sistema, mas o conteudo so pode ser descriptografado
-# pelo usuario ou conta de servico que criou o arquivo via DPAPI.
 $CREDENTIAL_FILE = "C:\ProgramData\TabelaFederadaSync\credenciais.enc"
+Add-Type -AssemblyName System.Security
 
-# ================================================================
-# BLOCO 2: FUNCAO - LEITURA SEGURA DE CREDENCIAIS (DPAPI)
-# ================================================================
-
-function Read-EncryptedCredentials {
-    <#
-    .SYNOPSIS
-        Le e descriptografa o arquivo de credenciais usando a DPAPI do Windows.
-    .DESCRIPTION
-        O arquivo .enc contem um JSON com os segredos criptografados via ConvertFrom-SecureString.
-        A DPAPI usa a chave derivada do perfil do usuario Windows atual -- portanto o arquivo
-        descriptografado SOMENTE funciona no mesmo usuario/maquina que o criou.
-        Retorna uma hashtable com as chaves: ApiToken, DbPassword
-    #>
+function Read-EncryptedConfig {
     param([string]$FilePath)
 
-    # Verifica se o arquivo de credenciais existe antes de tentar ler
     if (-not (Test-Path $FilePath)) {
         Write-Error "ERRO CRITICO: Arquivo de credenciais nao encontrado em: $FilePath"
-        Write-Error "Execute 'setup_credenciais.ps1' como administrador para configurar as credenciais."
         exit 1
     }
 
     try {
-        # Le o conteudo JSON do arquivo (contem campos criptografados como SecureString serializada)
-        $encrypted = Get-Content -Path $FilePath -Raw -Encoding UTF8 | ConvertFrom-Json
+        # Lê o Base64 gerado pelo Protect do PowerShell .NET
+        $encryptedB64 = Get-Content -Path $FilePath -Raw -Encoding UTF8
+        $encryptedBytes = [System.Convert]::FromBase64String($encryptedB64)
 
-        # Descriptografa o API Token: ConvertTo-SecureString usa DPAPI internamente
-        $secureApiToken = ConvertTo-SecureString $encrypted.ApiToken
-        # Converte de SecureString para texto puro apenas na memoria, para uso imediato
-        $plainApiToken  = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
-            [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureApiToken)
-        )
+        # Descriptografa com LocalMachine (necessita permissão NTFS concedida do setup_credenciais)
+        $plainBytes = [System.Security.Cryptography.ProtectedData]::Unprotect($encryptedBytes, $null, [System.Security.Cryptography.DataProtectionScope]::LocalMachine)
+        $jsonString = [System.Text.Encoding]::UTF8.GetString($plainBytes)
 
-        # Descriptografa a senha do banco de dados local (mesmo processo)
-        $secureDbPass = ConvertTo-SecureString $encrypted.DbPassword
-        $plainDbPass  = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
-            [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureDbPass)
-        )
-
-        # Retorna as credenciais descriptografadas como hashtable (ficam na memoria RAM apenas)
-        return @{
-            ApiToken   = $plainApiToken
-            DbPassword = $plainDbPass
-        }
-
+        # O JSON resultante já contém as variáveis
+        return ($jsonString | ConvertFrom-Json)
     } catch {
-        # Se falhar a descriptografia, pode ser que o arquivo foi copiado de outra maquina
-        # ou o usuario que esta executando nao e o mesmo que criou o arquivo.
-        Write-Error "ERRO: Falha ao descriptografar credenciais. O arquivo pode ter sido gerado em outro usuario/maquina."
-        Write-Error "Detalhes: $($_.Exception.Message)"
+        Write-Error "ERRO: Falha ao descriptografar credenciais. Detalhes: $($_.Exception.Message)"
         exit 1
     }
 }
@@ -123,31 +50,38 @@ function Read-EncryptedCredentials {
 # ================================================================
 # BLOCO 3: CARREGAMENTO DAS CREDENCIAIS E VALIDACOES INICIAIS
 # ================================================================
+# Todas as variaveis de ambiente sao validadas antes de qualquer operacao.
+# Se uma variavel estiver ausente, o script aborta com mensagem clara,
+# evitando erros crípticos durante a execucao principal.
 
 Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Iniciando sincronizacao do host: $HOST_ORIGEM"
 
-# Le e descriptografa as credenciais do arquivo .enc (DPAPI)
-$creds     = Read-EncryptedCredentials -FilePath $CREDENTIAL_FILE
-$API_TOKEN = $creds.ApiToken
-$DB_PASS   = $creds.DbPassword
+# Le todas configs contidas no Json Encriptado
+$configs = Read-EncryptedConfig -FilePath $CREDENTIAL_FILE
 
-# Valida que as credenciais foram carregadas corretamente
-if (-not $API_TOKEN -or -not $DB_PASS) {
-    Write-Error "ERRO: Credenciais retornadas estao vazias. Execute setup_credenciais.ps1 novamente."
-    exit 1
-}
+$API_URL     = $configs.ApiUrl
+$API_TOKEN   = $configs.ApiToken
+$MYSQL_EXE   = $configs.MysqlExe
+$DB_NAME     = $configs.DbName
+$DB_USER     = $configs.DbUser
+$DB_PASS     = $configs.DbPassword
+$HOST_ORIGEM = [System.Environment]::GetEnvironmentVariable("SYNC_HOST_ORIGEM", "Machine")
+if (-not $HOST_ORIGEM) { $HOST_ORIGEM = $configs.HostOrigem }
+$HTTP_TIMEOUT_SEGUNDOS = if ($configs.HttpTimeout) { [int]$configs.HttpTimeout } else { 180 }
 
-# Valida que o HOST_ORIGEM esta configurado (variavel de ambiente nao-secreta)
-if (-not $HOST_ORIGEM) {
-    Write-Error "ERRO: Variavel de ambiente SYNC_HOST_ORIGEM nao definida. Configure pelo instalador."
+# Valida as info basicas
+if (-not $API_TOKEN -or -not $DB_PASS -or -not $API_URL) {
+    Write-Error "ERRO: Credenciais ausentes. O processo sera cancelado."
     exit 1
 }
 
 # Valida que o executavel do MySQL existe no caminho configurado
 if (-not (Test-Path $MYSQL_EXE)) {
     Write-Error "ERRO: mysql.exe nao encontrado em: $MYSQL_EXE"
+    Write-Error "Verifique o valor da variavel SYNC_MYSQL_EXE ou reinstale o aplicativo."
     exit 1
 }
+
 
 # ================================================================
 # BLOCO 4: EXECUCAO PRINCIPAL (Coleta -> Parse -> Jitter -> Envio)

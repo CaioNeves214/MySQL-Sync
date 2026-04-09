@@ -49,15 +49,6 @@ def sincronizar():
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        # QUERY: Idempotência com INSERT IGNORE. Crucial para evitar duplicatas
-        # A chave única no banco (host_origem, ID_LOGUSUARIO_origem) garante a integridade.
-        query = """
-            INSERT IGNORE INTO log_usuario_servidor (
-                host_origem, ID_LOGUSUARIO_origem, ID_USUARIO, ID_EMPRESA, 
-                TEXTO, DT_LOGUSUARIO, HR_LOGUSUARIO, TIPO, TABELA, CHAVE_PRIMARIA
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """
-
         # LOOP: Itera sobre registros para inserção um a um (ou em lote se preferir)
         for reg in registros:
             # TEXTO (BLOB) é enviado como string e aceito pelo connector
@@ -74,7 +65,8 @@ def sincronizar():
                 reg.get('CHAVE_PRIMARIA')
             )
             
-            cursor.execute(query, valores)
+            # Chamada da Procedure de inserção na tabela
+            cursor.callproc('sp_inserir_log', valores)
             
             # MySQL Connector: rowcount > 0 se inserido, 0 se ignorado pelo INSERT IGNORE
             if cursor.rowcount > 0:

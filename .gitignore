@@ -13,8 +13,5 @@
 # Arquivos de configuração do agente
 /.agents
 
-# Arquivos de geração do setup NSIS
-*.nsi
-
 # Cache Python
 /servidor/__pycache__
