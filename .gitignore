@@ -1,5 +1,6 @@
 # Arquivos de segredos do servidor — NUNCA subir ao repositório
 .env
+*.env
 
 # Arquivos de credenciais criptografadas dos hosts (gerados pelo setup_credenciais.ps1)
 *.enc
